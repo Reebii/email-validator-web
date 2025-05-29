@@ -16,9 +16,9 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
+CORS(app, origins=['https://reebii.github.io'])
 
 # Configure CORS for production
-CORS(app, origins=["*"], methods=["GET", "POST"], allow_headers=["Content-Type"])
 
 # Import your email validator script
 try:
@@ -172,7 +172,7 @@ def home():
                 }
             }
         },
-        'github': 'https://github.com/yourusername/email-validator',
+        'github': 'https://github.com/Reebii/email-validator-web',
         'docs': 'See GitHub repository for documentation'
     }), 200
 
