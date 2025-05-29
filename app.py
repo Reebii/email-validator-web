@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import sys
 import logging
+import re
 from datetime import datetime
 
 # Configure logging for production
@@ -10,29 +11,97 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('api_log.txt'),
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout)  # Use stdout for Railway logging
     ]
 )
 
 app = Flask(__name__)
-CORS(app, origins=['https://reebii.github.io'])
 
-# Configure CORS for production
+# Enhanced CORS configuration
+CORS(app, 
+     origins=[
+         'https://reebii.github.io',
+         'http://localhost:3000',  # For local development
+         'http://127.0.0.1:3000'   # Alternative localhost
+     ],
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization'])
 
-# Import your email validator script
+# Request counter for basic stats (in-memory)
+request_stats = {
+    'total_requests': 0,
+    'successful_validations': 0,
+    'failed_validations': 0,
+    'start_time': datetime.now()
+}
+
+def advanced_email_validation(email):
+    """
+    Advanced email validation with multiple checks
+    """
+    try:
+        # Basic format check
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        
+        if not re.match(email_regex, email):
+            return False, "Invalid email format"
+        
+        # Split email into local and domain parts
+        local, domain = email.rsplit('@', 1)
+        
+        # Check local part length (max 64 characters)
+        if len(local) > 64:
+            return False, "Local part too long (max 64 characters)"
+        
+        # Check domain part length (max 253 characters)
+        if len(domain) > 253:
+            return False, "Domain part too long (max 253 characters)"
+        
+        # Check for consecutive dots
+        if '..' in email:
+            return False, "Consecutive dots not allowed"
+        
+        # Check for dots at start or end of local part
+        if local.startswith('.') or local.endswith('.'):
+            return False, "Local part cannot start or end with a dot"
+        
+        # Check domain has at least one dot
+        if '.' not in domain:
+            return False, "Domain must contain at least one dot"
+        
+        # Check domain doesn't start or end with hyphen
+        if domain.startswith('-') or domain.endswith('-'):
+            return False, "Domain cannot start or end with hyphen"
+        
+        # Basic disposable email check (you can expand this list)
+        disposable_domains = [
+            '10minutemail.com', 'tempmail.org', 'guerrillamail.com',
+            'mailinator.com', 'throwaway.email', 'temp-mail.org'
+        ]
+        
+        if domain.lower() in disposable_domains:
+            return False, "Disposable email addresses are not allowed"
+        
+        return True, "Email format is valid"
+        
+    except Exception as e:
+        logging.error(f"Email validation error: {e}")
+        return False, "Validation error occurred"
+
+# Try to import custom email validator, fallback to built-in
 try:
-    from email_validator import check_email
-    logging.info("Successfully imported email_validator module")
-except ImportError as e:
-    logging.error(f"Failed to import email_validator: {e}")
-    # Fallback basic validation if your script isn't available
+    from email_validator import check_email as custom_check_email
+    logging.info("Successfully imported custom email_validator module")
+    
     def check_email(email):
-        import re
-        pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-        if re.match(pattern, email):
-            return True, "Basic syntax validation passed (full validation unavailable)"
-        return False, "Invalid email format"
+        return custom_check_email(email)
+        
+except ImportError as e:
+    logging.warning(f"Custom email_validator not found: {e}")
+    logging.info("Using built-in advanced email validation")
+    
+    def check_email(email):
+        return advanced_email_validation(email)
 
 @app.route('/validate', methods=['POST', 'OPTIONS'])
 def validate_email():
@@ -41,6 +110,9 @@ def validate_email():
         return jsonify({'status': 'ok'}), 200
     
     try:
+        # Update stats
+        request_stats['total_requests'] += 1
+        
         # Log the request
         logging.info(f"Validation request received from {request.remote_addr}")
         
@@ -49,6 +121,7 @@ def validate_email():
         
         if not data or 'email' not in data:
             logging.warning("Request missing email field")
+            request_stats['failed_validations'] += 1
             return jsonify({
                 'valid': False,
                 'message': 'No email provided in request'
@@ -58,6 +131,7 @@ def validate_email():
         
         if not email:
             logging.warning("Empty email provided")
+            request_stats['failed_validations'] += 1
             return jsonify({
                 'valid': False,
                 'message': 'Empty email address'
@@ -66,21 +140,28 @@ def validate_email():
         # Basic length check
         if len(email) > 254:  # RFC 5321 limit
             logging.warning(f"Email too long: {len(email)} characters")
+            request_stats['failed_validations'] += 1
             return jsonify({
                 'valid': False,
-                'message': 'Email address too long'
+                'message': 'Email address too long (max 254 characters)'
             }), 400
         
         # Log the validation attempt
         logging.info(f"Validating email: {email}")
         
-        # Use your existing check_email function
+        # Use email validation function
         start_time = datetime.now()
         valid, info = check_email(email)
         end_time = datetime.now()
         
         # Calculate response time
         response_time = (end_time - start_time).total_seconds()
+        
+        # Update stats
+        if valid:
+            request_stats['successful_validations'] += 1
+        else:
+            request_stats['failed_validations'] += 1
         
         # Log the result
         logging.info(f"Validation result for {email}: {valid} - {info} (took {response_time:.2f}s)")
@@ -97,10 +178,11 @@ def validate_email():
         # Log the error for debugging
         error_msg = f"Error validating email: {str(e)}"
         logging.error(error_msg)
+        request_stats['failed_validations'] += 1
         
         return jsonify({
             'valid': False,
-            'message': f'Server error occurred during validation',
+            'message': 'Server error occurred during validation',
             'error_type': type(e).__name__
         }), 500
 
@@ -111,33 +193,26 @@ def health_check():
         'status': 'healthy',
         'message': 'Email validator API is running',
         'timestamp': datetime.now().isoformat(),
-        'version': '1.0.0'
+        'version': '1.0.0',
+        'uptime_seconds': (datetime.now() - request_stats['start_time']).total_seconds()
     }), 200
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """Basic API statistics"""
+    """API usage statistics"""
     try:
-        # Read log file to get basic stats
-        log_file = 'api_log.txt'
-        if os.path.exists(log_file):
-            with open(log_file, 'r') as f:
-                lines = f.readlines()
-            
-            total_requests = len([l for l in lines if 'Validation request received' in l])
-            successful_validations = len([l for l in lines if 'Validation result' in l and 'True' in l])
-            
-            return jsonify({
-                'total_requests': total_requests,
-                'successful_validations': successful_validations,
-                'uptime': 'Available in logs',
-                'last_request': datetime.now().isoformat()
-            }), 200
-        else:
-            return jsonify({
-                'total_requests': 0,
-                'message': 'No statistics available yet'
-            }), 200
+        uptime = datetime.now() - request_stats['start_time']
+        
+        return jsonify({
+            'total_requests': request_stats['total_requests'],
+            'successful_validations': request_stats['successful_validations'],
+            'failed_validations': request_stats['failed_validations'],
+            'success_rate': f"{(request_stats['successful_validations'] / max(request_stats['total_requests'], 1) * 100):.1f}%",
+            'uptime_seconds': uptime.total_seconds(),
+            'uptime_human': str(uptime).split('.')[0],  # Remove microseconds
+            'start_time': request_stats['start_time'].isoformat(),
+            'last_request': datetime.now().isoformat()
+        }), 200
             
     except Exception as e:
         logging.error(f"Error getting stats: {e}")
@@ -151,7 +226,7 @@ def home():
     return jsonify({
         'name': 'Email Validator API',
         'version': '1.0.0',
-        'description': 'Professional email validation with SMTP verification',
+        'description': 'Professional email validation with advanced format checking',
         'endpoints': {
             'POST /validate': 'Validate an email address',
             'GET /health': 'Health check',
@@ -167,11 +242,18 @@ def home():
                     'valid': True,
                     'message': 'Validation result details',
                     'email': 'test@example.com',
-                    'response_time': '1.23s',
+                    'response_time': '0.12s',
                     'timestamp': '2024-01-01T12:00:00'
                 }
             }
         },
+        'features': [
+            'Advanced email format validation',
+            'RFC 5321 compliance checking',
+            'Disposable email detection',
+            'Real-time validation',
+            'CORS enabled for web apps'
+        ],
         'github': 'https://github.com/Reebii/email-validator-web',
         'docs': 'See GitHub repository for documentation'
     }), 200
@@ -200,12 +282,6 @@ def internal_error(error):
     }), 500
 
 if __name__ == '__main__':
-    # Check if email_validator.py exists
-    if not os.path.exists('email_validator.py'):
-        logging.warning("email_validator.py not found! Using fallback validation.")
-        print("Warning: email_validator.py not found in the current directory!")
-        print("The API will use basic syntax validation only.")
-    
     # Get port from environment variable (required for Railway, Heroku, etc.)
     port = int(os.environ.get('PORT', 5000))
     
@@ -217,5 +293,4 @@ if __name__ == '__main__':
     logging.info("  GET / - API information")
     
     # Run the Flask app
-    # In production, use debug=False
     app.run(debug=False, host='0.0.0.0', port=port)
