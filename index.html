@@ -258,8 +258,8 @@
                 this.btnText = this.validateBtn.querySelector('.btn-text');
                 this.loading = this.validateBtn.querySelector('.loading');
 
-                // Update this URL to match your Flask server
-                 this.apiUrl = 'https://email-validator-web-production.up.railway.app/validate';
+                // FIXED: Removed the space in the URL
+                this.apiUrl = 'https://email-validator-web-production.up.railway.app/validate';
 
                 this.initEventListeners();
             }
